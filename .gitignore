@@ -1,0 +1,25 @@
+# Unreal Engine
+Binaries/
+Intermediate/
+Saved/
+DerivedDataCache/
+*.opensdf
+*.sdf
+*.suo
+*.tmp
+*.pdb
+*.ipdb
+*.iobj
+.vs/
+*.VC.db
+*.VC.opendb
+
+# Plugin build products
+unreal-plugin/MCP/Binaries/
+unreal-plugin/MCP/Intermediate/
+
+# Node
+node_modules/
+npm-debug.log
+dist/
+.env
