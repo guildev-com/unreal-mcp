@@ -1,139 +1,133 @@
-import express from "express";
-import bodyParser from "body-parser";
-import { WebSocketServer, WebSocket } from "ws";
+import { WebSocket, WebSocketServer } from "ws";
+import http from "http";
 import readline from "readline";
-type UEMessage = {
-  type: "log" | "info" | "error" | "meta" | "response";
-  payload?: any;
-  command?: string;
-  success?: boolean;
-  message?: string;
-  ts?: string;
-};
-type CommandMessage = {
-  type: "command";
-  payload: {
-    command: string; // text to execute inside Unreal (Exec)
-    id?: string; // optional id to correlate responses
-  };
-};
+
 const WS_PORT = 8081;
-const API_PORT = 4000;
-const wss = new WebSocketServer({ port: WS_PORT });
-const clients = new Set<WebSocket>();
-wss.on("connection", (socket, req) => {
-  console.log(`UE connected from ${req.socket.remoteAddress}`);
-  clients.add(socket);
-  socket.on("message", (data) => {
-    try {
-      const text = data.toString();
-      // Expect JSON messages from UE
-      const obj = JSON.parse(text) as UEMessage;
-      const time = obj.ts ?? new Date().toISOString();
-      if (obj.type === "response") {
-        // Handle command response from UE
-        const status = obj.success ? "✓" : "✗";
-        console.log(`[UE ${status}] ${obj.command}: ${obj.message}`);
-      } else {
-        console.log(`[UE ${time}] ${obj.type.toUpperCase()}:`, obj.payload);
-      }
-    } catch (err) {
-      // If message not JSON, print raw
-      console.log("[UE RAW]:", data.toString());
-    }
-  });
-  socket.on("close", () => {
-    console.log("UE disconnected");
-    clients.delete(socket);
-  });
-  socket.on("error", (err) => {
-    console.error("UE socket error:", err);
-    clients.delete(socket);
-  });
-});
-function broadcastCommand(command: string, id?: string) {
-  const msg: CommandMessage = {
-    type: "command",
-    payload: {
-      command,
-      id,
-    },
-  };
-  const text = JSON.stringify(msg);
-  for (const c of clients) {
-    if (c.readyState === c.OPEN) {
-      c.send(text);
-    }
-  }
-  console.log(`[MCP] Sent command to ${clients.size} client(s):`, command);
+const HTTP_PORT = 4000;
+
+let wss: WebSocketServer | null = null;
+let ueSocket: WebSocket | null = null;
+let ueConnected = false;
+const recentLogs: string[] = [];
+const MAX_LOGS = 100;
+
+function setUEConnection(socket: WebSocket | null) {
+  ueSocket = socket;
+  ueConnected = socket !== null;
 }
-// Simple REST API so other tools / AI can POST commands
-const app = express();
-app.use(bodyParser.json());
-app.post("/command", (req, res) => {
-  const command = req.body?.command;
-  if (!command || typeof command !== "string") {
-    return res.status(400).json({ error: "missing 'command' string in body" });
-  }
-  broadcastCommand(command, req.body?.id);
-  res.json({ status: "ok", sentTo: clients.size });
-});
-app.get("/health", (_req, res) => {
-  res.json({ status: "ok", wsClients: clients.size });
-});
-app.listen(API_PORT, () => {
-  console.log(`MCP API listening on http://localhost:${API_PORT}`);
-  console.log(`WebSocket server listening on ws://localhost:${WS_PORT}`);
-});
-// Optional interactive CLI to type commands to UE
-const rl = readline.createInterface({
-  input: process.stdin,
-  output: process.stdout,
-});
-rl.setPrompt("mcp> ");
-rl.prompt();
-rl.on("line", (line) => {
-  const trimmed = line.trim();
-  if (!trimmed) {
-    rl.prompt();
-    return;
-  }
-  // Built-in commands
-  switch (trimmed.toLowerCase()) {
-    case "clients":
-      console.log("Connected clients:", clients.size);
-      rl.prompt();
+
+function getUEConnected() {
+  return ueConnected;
+}
+
+function sendCommand(command: string): Promise<any> {
+  return new Promise((resolve, reject) => {
+    if (!ueSocket || ueSocket.readyState !== WebSocket.OPEN) {
+      reject(new Error("UE not connected"));
       return;
-    case "exit":
-    case "quit":
-      console.log("Exiting MCP server...");
-      process.exit(0);
-    case "play":
-      broadcastCommand("pie.play");
-      rl.prompt();
+    }
+    ueSocket.send(JSON.stringify({ type: "command", payload: { command } }));
+    resolve({ success: true, message: "sent" });
+  });
+}
+
+function startWSServer() {
+  if (wss) return;
+
+  wss = new WebSocketServer({ port: WS_PORT });
+  console.log(`[MCP] WebSocket server on ws://localhost:${WS_PORT}`);
+
+  wss.on("connection", (socket) => {
+    console.log("[UE] connected");
+    setUEConnection(socket);
+
+    socket.on("message", (msg) => {
+      try {
+        const data = JSON.parse(msg.toString());
+
+        if (data.type === "log") {
+          console.log(`[UE] ${data.payload}`);
+          recentLogs.push(data.payload);
+          if (recentLogs.length > MAX_LOGS) recentLogs.shift();
+        }
+
+        if (data.type === "response") {
+          console.log(`[UE] Response: ${data.command} → ${data.message}`);
+        }
+      } catch {}
+    });
+
+    socket.on("close", () => {
+      console.log("[UE] disconnected");
+      setUEConnection(null);
+    });
+  });
+}
+
+function startHTTPServer() {
+  const server = http.createServer(async (req, res) => {
+    res.setHeader("Content-Type", "application/json");
+
+    if (req.method === "GET" && req.url === "/health") {
+      res.end(JSON.stringify({ status: "ok", ueConnected: getUEConnected() }));
       return;
-    case "stop":
-      broadcastCommand("pie.stop");
-      rl.prompt();
+    }
+
+    if (req.method === "GET" && req.url === "/logs") {
+      res.end(JSON.stringify({ logs: recentLogs }));
       return;
-    case "status":
-      broadcastCommand("pie.status");
-      rl.prompt();
+    }
+
+    if (req.method === "POST" && req.url === "/command") {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", async () => {
+        try {
+          const { command } = JSON.parse(body);
+          const result = await sendCommand(command);
+          res.end(JSON.stringify(result));
+        } catch (e) {
+          res.statusCode = 400;
+          res.end(JSON.stringify({ error: String(e) }));
+        }
+      });
       return;
-    case "help":
-      console.log(`
-Available commands:
-  play     - Start PIE (Play In Editor)
-  stop     - Stop PIE
-  status   - Get PIE status
-  clients  - Show connected UE clients
-  exit     - Exit server
-  <any>    - Send as console command to UE
-`);
-      rl.prompt();
-      return;
-  }
-  // Broadcast input line as command
-  broadcastCommand(trimmed);
+    }
+
+    res.end(JSON.stringify({ ok: true }));
+  });
+
+  server.listen(HTTP_PORT, () => {
+    console.log(`[MCP] HTTP API running on http://localhost:${HTTP_PORT}`);
+  });
+}
+
+async function startCLI() {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+
+  rl.setPrompt("mcp> ");
   rl.prompt();
-});
+
+  rl.on("line", async (line) => {
+    const cmd = line.trim();
+    if (!cmd) return rl.prompt();
+
+    if (!getUEConnected()) {
+      console.log("UE not connected");
+      return rl.prompt();
+    }
+
+    const result = await sendCommand(cmd);
+    console.log(`Sent: ${cmd}`);
+
+    rl.prompt();
+  });
+}
+
+// MAIN (CLI MODE)
+startWSServer();
+startHTTPServer();
+startCLI();

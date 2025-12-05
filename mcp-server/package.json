@@ -1,22 +1,31 @@
 {
-  "name": "mcp-server",
+  "name": "unreal-mcp-server",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "MCP server for Unreal Engine automation",
+  "main": "dist/index.js",
+  "type": "module",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "ts-node-dev --respawn --transpile-only src/index.ts"
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "mcp": "node dist/mcp-stdio.js"
   },
-  "keywords": [],
-  "author": "",
+  "keywords": [
+    "mcp",
+    "unreal",
+    "automation"
+  ],
+  "author": "Riya",
   "license": "ISC",
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
     "@types/express": "^5.0.6",
+    "@types/node": "^20.0.0",
     "@types/ws": "^8.18.1",
     "body-parser": "^2.2.1",
     "express": "^5.2.1",
     "ts-node-dev": "^2.0.0",
     "typescript": "^5.9.3",
-    "ws": "^8.18.3"
+    "ws": "^8.18.3",
+    "zod": "^3.25.0"
   }
 }
